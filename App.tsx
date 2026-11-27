@@ -1,330 +1,203 @@
-
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import Diagram from './components/Diagram';
-import logo from './logo.png';
-
-import { 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  Maximize2,
-  FastForward,
-  Rewind,
-  SkipBack,
-  SkipForward
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Play, Pause, RotateCcw, SkipBack, SkipForward, Maximize2, Minimize2, ExternalLink, ArrowRight,
 } from 'lucide-react';
+import Diagram from './components/Diagram';
+import Timeline from './components/Timeline';
+import StepList from './components/StepList';
+import { STEPS, TOTAL_DURATION, PHASE_BY_ID, NODES, stepIndexAt } from './data/callflow';
+import logo from './basig-logo.png';
 
-const TOTAL_DURATION = 240; 
+const SPEEDS = [0.5, 1, 2, 4];
 
-// Key protocol timestamps for step-by-step navigation
-const PROTOCOL_STEPS = [
-  0, 3, 5, 9, 11, 15, 17, 21, 23, 27, 29, 33, 35, 39, 41, 45, 47, 50, 56, 62, 
-  65, 71, 77, 83, 89, 95, 97, 99, 101, 107, 113, 119, 125, 131, 137, 143, 149, 155, 
-  161, 167, 173, 179, 185, 191, 197, 203, 209
-];
+const fmt = (s: number) => {
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${r.toString().padStart(2, '0')}`;
+};
 
 const App: React.FC = () => {
-  const [isPlaying, setIsPlaying] = useState(true);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [viewBoxW, setViewBoxW] = useState(1800);
-  const [viewBoxH, setViewBoxH] = useState(1993);
-  
-  const containerRef = useRef<HTMLDivElement>(null);
-  const requestRef = useRef<number | undefined>(undefined);
-  const lastSeekTimeRef = useRef<number>(0);
-
-  const getAnimations = useCallback(() => {
-    if (!containerRef.current) return [];
-    return containerRef.current.getAnimations({ subtree: true });
+  // Deep link: #step-12 opens the demo at step 12; #step-12-paused also pauses there.
+  const initial = useMemo(() => {
+    const m = /^#step-(\d+)(-paused)?$/.exec(window.location.hash);
+    if (!m) return { t: 0, playing: true };
+    const i = Math.max(1, Math.min(STEPS.length, Number(m[1]))) - 1;
+    return { t: STEPS[i].start, playing: !m[2] };
   }, []);
+  const [t, setT] = useState(initial.t);
+  const [playing, setPlaying] = useState(initial.playing);
+  const [rate, setRate] = useState(1);
+  const [fullscreen, setFullscreen] = useState(false);
 
-  const syncTime = useCallback((time: number) => {
-    const anims = getAnimations();
-    anims.forEach(anim => {
-      if (isFinite(time)) {
-        anim.currentTime = time * 1000;
-      }
-    });
-  }, [getAnimations]);
+  const tRef = useRef(initial.t);
+  const rateRef = useRef(rate);
+  rateRef.current = rate;
 
-  const syncSpeed = useCallback((rate: number) => {
-    const anims = getAnimations();
-    anims.forEach(anim => {
-      anim.playbackRate = rate;
-    });
-  }, [getAnimations]);
-
-  const syncPlayState = useCallback((playing: boolean) => {
-    const anims = getAnimations();
-    anims.forEach(anim => {
-      if (playing) anim.play(); else anim.pause();
-    });
-  }, [getAnimations]);
-
-  useEffect(() => { syncSpeed(playbackRate); }, [playbackRate, syncSpeed]);
-  useEffect(() => { syncPlayState(isPlaying); }, [isPlaying, syncPlayState]);
-
+  // Single clock that drives everything.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      syncTime(currentTime);
-      syncSpeed(playbackRate);
-      syncPlayState(isPlaying);
-    }, 200); 
-    return () => clearTimeout(timer);
-  }, []);
-
-  const animate = useCallback(() => {
-    if (isPlaying) {
-      if (Date.now() - lastSeekTimeRef.current > 300) {
-        const anims = getAnimations();
-        if (anims.length > 0) {
-          const refAnim = anims.find(a => (a as any).id !== 'ignore') || anims[0];
-          if (refAnim && refAnim.currentTime !== null) {
-             const timeInSeconds = (refAnim.currentTime as number) / 1000;
-             setCurrentTime(timeInSeconds % (TOTAL_DURATION + 0.1));
-          }
-        }
-      }
-    }
-    requestRef.current = requestAnimationFrame(animate);
-  }, [isPlaying, getAnimations]);
-
-  useEffect(() => {
-    requestRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (requestRef.current) cancelAnimationFrame(requestRef.current);
+    if (!playing) return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000);
+      last = now;
+      const next = Math.min(TOTAL_DURATION, tRef.current + dt * rateRef.current);
+      tRef.current = next;
+      setT(next);
+      if (next >= TOTAL_DURATION) { setPlaying(false); return; }
+      raf = requestAnimationFrame(tick);
     };
-  }, [animate]);
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
 
-  const handleManualTimeChange = (newTime: number) => {
-    const clamped = Math.min(Math.max(newTime, 0), TOTAL_DURATION);
-    lastSeekTimeRef.current = Date.now();
-    setCurrentTime(clamped);
-    syncTime(clamped);
-  };
+  const seek = useCallback((time: number) => {
+    const c = Math.max(0, Math.min(TOTAL_DURATION, time));
+    tRef.current = c;
+    setT(c);
+  }, []);
 
-  const handleSeek = (delta: number) => {
-    handleManualTimeChange(currentTime + delta);
-  };
+  const stepIndex = stepIndexAt(t);
+  const step = STEPS[stepIndex];
+  const phase = PHASE_BY_ID[step.phase];
+  const stepProgress = Math.min(1, (t - step.start) / step.dur);
 
-  const jumpToNextStep = () => {
-    const next = PROTOCOL_STEPS.find(s => s > currentTime + 0.5);
-    if (next !== undefined) handleManualTimeChange(next);
-  };
+  const goStep = useCallback((i: number) => {
+    const idx = Math.max(0, Math.min(STEPS.length - 1, i));
+    seek(STEPS[idx].start);
+  }, [seek]);
 
-  const jumpToPrevStep = () => {
-    const prev = [...PROTOCOL_STEPS].reverse().find(s => s < currentTime - 0.5);
-    if (prev !== undefined) handleManualTimeChange(prev); else handleManualTimeChange(0);
-  };
+  const next = useCallback(() => goStep(stepIndexAt(tRef.current) + 1), [goStep]);
+  const prev = useCallback(() => {
+    const i = stepIndexAt(tRef.current);
+    if (tRef.current - STEPS[i].start > 1.2) goStep(i); else goStep(i - 1);
+  }, [goStep]);
 
-  const handleRestart = () => {
-    lastSeekTimeRef.current = Date.now();
-    setCurrentTime(0);
-    syncTime(0);
-    setIsPlaying(true);
-    syncPlayState(true);
-  };
+  const togglePlay = useCallback(() => {
+    if (tRef.current >= TOTAL_DURATION) seek(0);
+    setPlaying(p => !p);
+  }, [seek]);
+
+  const restart = useCallback(() => { seek(0); setPlaying(true); }, [seek]);
+
+  const toggleFullscreen = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else document.documentElement.requestFullscreen?.().catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+      else if (e.key === 'Home' || e.key === 'r') restart();
+      else if (e.key === 'f') toggleFullscreen();
+      else if (e.key === '+' || e.key === '=') setRate(r => SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(r) + 1)]);
+      else if (e.key === '-') setRate(r => SPEEDS[Math.max(0, SPEEDS.indexOf(r) - 1)]);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [togglePlay, next, prev, restart, toggleFullscreen]);
+
+  const path = step.msg?.path;
+  const from = path?.[0];
+  const to = path?.[path.length - 1];
+  const via = path && path.length > 2 ? path.slice(1, -1) : [];
+
+  const diagram = useMemo(() => <Diagram t={t} stepIndex={stepIndex} />, [t, stepIndex]);
 
   return (
-    <div className="flex flex-col h-screen w-full bg-white overflow-hidden font-sans select-none">
-      
-      {/* Zoom Controls Overlay - WIDTH */}
-      <div className="fixed bottom-4 left-4 z-[110] bg-white/80 backdrop-blur-sm p-3 rounded-xl border border-slate-200 shadow-lg text-[10px] flex flex-col gap-2">
-        <div className="flex flex-col gap-1">
-          <label className="font-bold text-slate-500 uppercase tracking-tighter">ViewWidth: {viewBoxW}px</label>
-          <input 
-            type="range" 
-            min="600" max="3000" 
-            value={viewBoxW} 
-            onChange={(e) => setViewBoxW(Number(e.target.value))}
-            className="w-32 h-1 accent-indigo-600 cursor-ew-resize opacity-70 hover:opacity-100 transition-opacity"
-          />
-        </div>
-      </div>
-
-      {/* Zoom Controls Overlay - HEIGHT */}
-      <div className="fixed bottom-4 right-4 z-[110] bg-white/80 backdrop-blur-sm p-3 rounded-xl border border-slate-200 shadow-lg text-[10px] flex flex-col gap-2">
-        <div className="flex flex-col gap-1 items-end">
-          <label className="font-bold text-slate-500 uppercase tracking-tighter">ViewHeight: {viewBoxH}px</label>
-          <input 
-            type="range" 
-            min="600" max="3000" 
-            value={viewBoxH} 
-            onChange={(e) => setViewBoxH(Number(e.target.value))}
-            style={{ writingMode: 'vertical-lr' }}
-            className="h-32 w-1 accent-indigo-600 appearance-auto cursor-ns-resize opacity-70 hover:opacity-100 transition-opacity"
-          />
-        </div>
-      </div>
-
-      {/* Header - Adjusted for centering and symbol removal */}
-      <header className="shrink-0 bg-white border-b border-slate-100 px-6 py-3 flex items-center justify-between z-[105] min-h-[72px]">
-        {/* Empty left spacer to maintain center alignment */}
-        
-        
-        {/* Centered Heading */}
-        {/*
-        <div className="flex-grow text-center">
-          <h1 className="text-sm md:text-lg font-black text-slate-800 tracking-tight leading-none uppercase">Interactive 5G Call Flow Visualizer</h1>
-          <h2 className="text-[12px] md:text-[14px] font-black text-slate-700 tracking-widest uppercase">Chandhar Research Labs Pvt. Ltd.</h2>
-        </div> */}
-        
-        <div className="flex-grow flex items-center justify-center gap-3">
-          {/* Logo */}
-          <img
-              src={logo}
-              alt="Chandhar Research Labs Logo"
-              className="h-20 w-auto object-contain"
-          />
-          {/* Text */}
-          <div className="text-center">
-            <h1 className="text-sm md:text-lg font-black text-slate-800 tracking-tight leading-none uppercase">
-              Interactive 5G Call Flow Visualizer
-            </h1>
-            <h2 className="text-[12px] md:text-[14px] font-black text-slate-700 tracking-widest uppercase">
-              Chandhar Research Labs Pvt. Ltd.
-            </h2>
+    <div className="app" style={{ '--phase': phase.color } as React.CSSProperties}>
+      <header className="topbar">
+        <div className="brand">
+          <img src={logo} alt="BaSig Wireless Laboratories" className="brand-logo" />
+          <span className="brand-divider" />
+          <div>
+            <h1>5G SA Call Flow Visualizer</h1>
+            <p>BaSig Wireless Laboratories</p>
           </div>
         </div>
-                
-
-        {/* Timers on Right */}
-        
+        <div className="topbar-right">
+          <div className="phase-pill">
+            <span className="dot" />
+            {phase.name}
+          </div>
+          <button className="icon-btn" onClick={toggleFullscreen} title="Full screen (F)">
+            {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+          </button>
+        </div>
       </header>
 
-      {/* Diagram Container */}
-      <main className="flex-grow overflow-auto relative bg-white custom-scrollbar">
-        <div className="w-full flex justify-center py-4">
-          <div ref={containerRef} className="relative">
-            <Diagram width={viewBoxW} height={viewBoxH} />
-          </div>
-        </div>
-      </main>
+      <div className="body">
+        <main className="stage">
+          <div className="canvas">{diagram}</div>
+        </main>
 
-      
-      <div className="fixed bottom-6 left-1/2 -translate-x-[40%] z-[120] w-[70%] max-w-xl">
-        <div className="bg-white/95 backdrop-blur-md border border-slate-200 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.1)] p-2 flex flex-col gap-2 scale-90">
-          
-          
-          <div className="w-full group">
-            <div className="flex justify-between mb-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-              <span>{currentTime.toFixed(1)}s</span>
-              <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded">Scrub to Forward/Backward</span>
-              <span>{TOTAL_DURATION}s</span>
+        <aside className="sidebar">
+          <section className="now">
+            <div className="now-meta">
+              <span className="now-step">Step {stepIndex + 1} <span className="of">/ {STEPS.length}</span></span>
+              <span className="now-phase">{phase.name}</span>
             </div>
-            <div className="relative flex items-center h-4">
-              <input 
-                type="range" 
-                min="0" 
-                max={TOTAL_DURATION} 
-                step="0.1"
-                value={currentTime}
-                onChange={(e) => handleManualTimeChange(Number(e.target.value))}
-                className="timeline-slider w-full h-1.5 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-indigo-600 z-10"
-              />
-              <div 
-                className="absolute top-1/2 left-0 h-1.5 bg-indigo-600 rounded-lg -translate-y-1/2 pointer-events-none transition-all duration-100"
-                style={{ width: `${(currentTime / TOTAL_DURATION) * 100}%` }}
-              ></div>
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between">
-            
-            <div className="flex items-center gap-1.5">
-              <button onClick={jumpToPrevStep} className="action-btn-small" title="Previous Step">
-                <SkipBack size={14} />
-              </button>
-              <button onClick={() => handleSeek(-5)} className="action-btn-small" title="Back 5s">
-                <Rewind size={14} />
-              </button>
-            </div>
-
-            
-            <div className="flex items-center gap-4">
-              <button 
-                onClick={() => setIsPlaying(!isPlaying)} 
-                className="w-16 h-16 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-xl hover:bg-black hover:scale-105 active:scale-95 transition-all"
-              >
-                {isPlaying ? <Pause size={28} fill="white" /> : <Play size={28} fill="white" className="ml-1" />}
-              </button>
-              <button onClick={handleRestart} className="p-3 text-slate-400 hover:text-indigo-600 transition-colors" title="Restart">
-                <RotateCcw size={20} className="stroke-[2.5px]" />
-              </button>
-            </div>
-
-            
-            <div className="flex items-center gap-1.5">
-              <button onClick={() => handleSeek(5)} className="action-btn-small" title="Forward 5s">
-                <FastForward size={14} />
-              </button>
-              <button onClick={jumpToNextStep} className="action-btn-small" title="Next Step">
-                <SkipForward size={14} />
-              </button>
-            </div>
-          </div> 
-
-          
-          <div className="flex items-center justify-between pt-2 border-t border-slate-50">
-            <div className="flex items-center gap-3">
-              <span className="text-[9px] font-black text-slate-300 uppercase tracking-widest">Slow Down / Fasten</span>
-              <div className="flex bg-slate-50 p-1 rounded-xl border border-slate-100">
-                {[0.5, 1, 2, 5].map((rate) => (
-                  <button 
-                    key={rate} 
-                    onClick={() => setPlaybackRate(rate)} 
-                    className={`px-4 py-1.5 rounded-lg text-[10px] font-black transition-all ${playbackRate === rate ? 'bg-white text-indigo-600 shadow-md ring-1 ring-slate-200' : 'text-slate-400 hover:text-slate-600'}`}
-                  >
-                    {rate}x
-                  </button>
+            <h2>{step.title}</h2>
+            {step.msg && (
+              <div className="route">
+                <span className="node-chip">{NODES[from!].label}</span>
+                {via.map(v => (
+                  <React.Fragment key={v}>
+                    <ArrowRight size={14} className="route-arrow" />
+                    <span className="node-chip ghost">{NODES[v].label}</span>
+                  </React.Fragment>
                 ))}
+                <ArrowRight size={14} className="route-arrow" />
+                <span className="node-chip">{NODES[to!].label}</span>
+                <span className="iface">{step.msg.iface}</span>
               </div>
+            )}
+            {step.msg && <code className="msg-name">{step.msg.name}</code>}
+            <p className="desc">{step.desc}</p>
+            <div className="now-foot">
+              {step.spec && (
+                <a href={step.spec.url} target="_blank" rel="noreferrer" className="spec-link">
+                  {step.spec.label} <ExternalLink size={12} />
+                </a>
+              )}
+              <div className="mini-progress"><div style={{ width: `${stepProgress * 100}%` }} /></div>
             </div>
-            
-            <div className="flex items-center gap-2">
-               <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span>
-               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">Active Connection</span>
-            </div>
-          </div>
-        </div>
+          </section>
+
+          <StepList current={stepIndex} progress={stepProgress} onSelect={goStep} />
+        </aside>
       </div>
 
-      <style>{`
-        .action-btn-small {
-          background: #f8fafc;
-          border: 1px solid #f1f5f9;
-          border-radius: 12px;
-          padding: 10px;
-          color: #64748b;
-          transition: all 0.2s;
-        }
-        .action-btn-small:hover { 
-          background: white; 
-          border-color: #e2e8f0; 
-          color: #4f46e5;
-          box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-        }
-        .action-btn-small:active { transform: scale(0.95); }
+      <footer className="transport">
+        <div className="controls">
+          <button className="icon-btn" onClick={prev} title="Previous step (←)"><SkipBack size={18} /></button>
+          <button className="play-btn" onClick={togglePlay} title="Play / pause (Space)">
+            {playing ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" className="nudge" />}
+          </button>
+          <button className="icon-btn" onClick={next} title="Next step (→)"><SkipForward size={18} /></button>
+          <button className="icon-btn" onClick={restart} title="Restart (R)"><RotateCcw size={17} /></button>
+        </div>
 
-        .timeline-slider::-webkit-slider-thumb {
-          appearance: none;
-          width: 14px;
-          height: 14px;
-          background: white;
-          border: 3px solid #4f46e5;
-          border-radius: 50%;
-          cursor: pointer;
-          box-shadow: 0 0 10px rgba(79, 70, 229, 0.3);
-          transition: transform 0.1s;
-        }
-        .timeline-slider::-webkit-slider-thumb:hover { transform: scale(1.3); }
+        <span className="time">{fmt(t)}</span>
+        <Timeline t={t} onSeek={seek} />
+        <span className="time muted">{fmt(TOTAL_DURATION)}</span>
 
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
-      `}</style>
+        <div className="speed" role="group" aria-label="Playback speed">
+          {SPEEDS.map(s => (
+            <button key={s} className={s === rate ? 'active' : ''} onClick={() => setRate(s)}>{s}×</button>
+          ))}
+        </div>
+      </footer>
     </div>
   );
 };
